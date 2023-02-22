@@ -1,0 +1,195 @@
+---
+title: "PCA_Autoencoder"
+output: html_notebook
+---
+
+# load data
+```{r}
+data100<-read.csv("data_72_variables_constructed.csv")
+```
+
+# PCA
+```{r}
+## Subset the first 1000 rows to pretest
+# data1000=data100[1:1000,]
+## check the correlation (in case of correlation = 1 between different variables)
+#sapply(data1000, class)
+
+#Select only the newly created 72 variables
+data100_r=data100[,-c(1:29)]
+#cor(data100_r)
+
+## save(correlation, file = "correlation.csv")
+
+
+## PCA
+pca_result = prcomp(data100_r, center = T, scale = T)
+## if we do not do z-scale manually, we use "center = T, scale = T" and get the same output
+#print(pca_result) ## standard deviations
+plot(pca_result, xlab = "Principal Component")
+
+pve=data.frame(PC=seq(1,72,1),pve=pca_result$sdev^2/sum(pca_result$sdev^2))
+ggplot(pve, aes(x=round(PC,0), y=pve*100))+
+  geom_bar(stat = "identity",fill="lightblue")+
+  geom_line(color="darkgrey")+
+  geom_point()+
+  scale_x_continuous(limits = c(0,10),
+                     breaks = seq(1,10,1))+
+  labs(x = "Principal Component",
+       y = "Proportion of Variance Explained",
+       title = "Scree Plot")+
+  theme(plot.title = element_text(hjust = 0.5))
+sum(pca_result$sdev[1]^2)/sum(pca_result$sdev^2)
+
+## scree plot to understand the smallest number of principla componets required
+## focus on the point at which the proportion of variance drops off
+
+## proportion plot
+plot(pve, xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained",
+     type = "b")
+plot(pve[1:20], xlab = "Principal Component",
+     ylab = "Proportion of Variance Explained",
+     type = "b")
+## there is an odd at pc 13
+## therefore, we should cut at 13 or 14, we cut at 13
+
+plot(pve,xlab='Principal Component',ylab='Proportion of Variance Explained',
+     ylim=c(0,0.5),
+     xlim=c(0,10),
+     type='b',main='Scree Plot')
+plot(cumsum(pve), xlab="Principal Component ", ylab=" Cumulative Proportion of Variance Explained ", 
+     ylim=c(0,1),
+     xlim=c(0,10),
+     type='b')
+
+# Select only PC1 to PC7
+PCA=data.frame(pca_result$rotation)
+pcaneed=PCA%>%
+  select(PC1:PC7)
+
+# multiply it back to the original data
+finaldata=data.frame(as.matrix(data100_r) %*% as.matrix(pcaneed))
+
+# Z-scale the PCA results again
+for(i in 1:7){
+  sd=sd(finaldata[,i])
+  mean=mean(finaldata[,i])
+  finaldata[,i]=(finaldata[,i]-mean)/sd
+}
+
+save(finaldata, file = "finaldata.rda")
+
+score1=data.frame(record=seq(1,1048575,1),score1=(rowSums(as.matrix(finaldata)**2))**(1/2))
+save(score1,file = "Outlier_Score1.rda")
+```
+
+# Heuristic Algorithm
+```{r}
+## calculate fraud score
+mean = colMeans(finaldata)
+cov = cov(finaldata)
+ma_dist = mahalanobis(finaldata, mean, cov)
+ma_dist = data.frame(cbind(1:length(ma_dist), ma_dist))
+colnames(ma_dist) = c("Record", "ma_dist")
+
+summary(ma_dist$ma_dist)
+quantile(ma_dist$ma_dist, 0.99)
+
+## plot a histogram
+ggplot(data = ma_dist, aes(x = ma_dist)) +
+    geom_histogram() +
+    scale_x_log10()
+```
+
+# Autoencoder
+```{r}
+## Autoencoder using h2o
+library(h2o)
+localH2O = h2o.init()
+
+finaldata.hex = as.h2o(finaldata)
+
+finaldata.dl = h2o.deeplearning(x = names(finaldata.hex), 
+                                training_frame = finaldata.hex,
+                               autoencoder = TRUE,
+                               reproducible = F)
+## Reconstruct
+finaldata.anon = h2o.anomaly(finaldata.dl, finaldata.hex, per_feature=TRUE)
+err = as.data.frame(finaldata.anon)
+  # the "err" data frame contains all reconstruction errors of each record
+## Plot the reconstructed Squared Error for the first 3 PCs
+#plot(err$reconstr_pc1.SE, main='Reconstruction Error - PC1', 
+     #ylab = "Reconstruction Error")
+#plot(err$reconstr_pc2.SE, main='Reconstruction Error - PC2', 
+     #ylab = "Reconstruction Error")
+#plot(err$reconstr_pc3.SE, main='Reconstruction Error - PC3', 
+     #ylab = "Reconstruction Error")
+
+## histogram of the scores
+#ggplot(data = err, aes(x = reconstr_pc1.SE)) +
+    #geom_histogram() +
+    #scale_x_log10()
+
+#ggplot(data = err, aes(x = log(reconstr_pc1.SE))) +
+    #geom_histogram() +
+    #xlim(-21,0)
+
+score2 = data.frame(record=seq(1,1048575,1),score2=rowSums(err)**(1/2))
+save(score2, file = "Auto_Score2.rda")
+
+```
+
+# Combined Score
+```{r}
+library(dplyr)
+library(ggplot2)
+
+rankScore1 = cbind.data.frame(score1, ranking = rep(0,1048575))
+rankScore1 = rankScore1[,-1]
+orderedrank1 = arrange(rankScore1, desc(score1))
+
+score1[5393,]
+
+for (i in 1:999){
+  a=(i-1)*1049
+  b=i*1049
+  orderedrank1[a:b,3] = 1001-i
+  
+}  
+
+orderedrank1[1047952:1048575,3] = 1
+
+
+
+rankScore2 = cbind.data.frame(score2, ranking = rep(0,1048575))
+rankScore2 = rankScore2[,-1]
+orderedrank2 = arrange(rankScore2, desc(score2))
+
+for (i in 1:999){
+  a=(i-1)*1049
+  b=i*1049
+  orderedrank2[a:b,3] = 1001-i
+  
+}  
+
+orderedrank2[1047952:1048575,3] = 1
+  
+  
+recordOrder1 = arrange(orderedrank1,record)
+recordOrder2 = arrange(orderedrank2,record)
+
+totalOrder  = left_join(recordOrder1,recordOrder2,by=c("record"="record"))
+
+totalOrder= mutate(totalOrder, combinedRank = (ranking.x+ranking.y)/2)
+finalRanking = arrange(totalOrder, -combinedRank)
+
+totalOrder %>%
+  filter(ranking.x == ranking.y)%>%
+  count()
+
+save(finalRanking,file="Final_Score.rda")
+
+ 
+```
+
